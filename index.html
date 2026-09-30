@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulletins & relevés</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{--bg:#f4f5f7;--card:#fff;--txt:#1a1d21;--doux:#5b6570;--bord:#e3e6ea;
+    --accent:#111418;--accent-txt:#fff;--ok:#137a3f;--warn:#b25e00;--err:#b3261e;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    background:var(--bg);color:var(--txt);line-height:1.5}
+  .wrap{max-width:920px;margin:0 auto;padding:24px 18px 80px}
+  h1{font-size:1.5rem;margin:.2em 0}
+  h2{font-size:1.15rem;margin:1.6em 0 .4em;border-top:1px solid var(--bord);padding-top:1.2em}
+  .doux{color:var(--doux);font-size:.9rem}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:16px;margin:10px 0}
+  input[type=file]{width:100%}
+  button{font:inherit;font-weight:600;background:var(--accent);color:var(--accent-txt);
+    border:0;border-radius:8px;padding:9px 16px;cursor:pointer}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.sec{background:#eef0f3;color:var(--txt)}
+  table{width:100%;border-collapse:collapse;font-size:.9rem}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--bord);vertical-align:top}
+  th{font-size:.8rem;color:var(--doux);text-transform:uppercase;letter-spacing:.03em}
+  select{font:inherit;max-width:230px;padding:4px}
+  .etat-ok{color:var(--ok);font-weight:600}
+  .etat-warn{color:var(--warn);font-weight:600}
+  .etat-err{color:var(--err);font-weight:600}
+  .row-actions a,.row-actions button{font-size:.82rem;padding:4px 8px;margin-right:4px}
+  .hint{background:#eef4ff;border:1px solid #cddffb;border-radius:8px;padding:10px 12px;font-size:.88rem}
+  code{background:#eef0f3;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📨 Bulletins &amp; relevés</h1>
+  <p class="doux">Tout se passe dans votre navigateur — aucun document n'est envoyé sur Internet.
+    Rapproche les bulletins et relevés par nom, fusionne en un PDF par chauffeur, puis prépare l'envoi.</p>
+
+  <h2>1 · Fichier clients (Excel)</h2>
+  <div class="card">
+    <input type="file" id="excel" accept=".xlsx,.xls">
+    <p class="doux" id="excelInfo">Colonnes attendues : Nom, Prénom, Email.</p>
+  </div>
+
+  <h2>2 · Documents PDF</h2>
+  <div class="card">
+    <label>Bulletins de paie</label>
+    <input type="file" id="bulletins" accept="application/pdf" multiple>
+    <label style="display:block;margin-top:12px">Relevés</label>
+    <input type="file" id="releves" accept="application/pdf" multiple>
+    <p class="doux" id="pdfInfo"></p>
+  </div>
+
+  <h2>3 · Rapprochement</h2>
+  <div class="card">
+    <button id="btnMatch" disabled>Rapprocher par nom</button>
+    <span class="doux" id="matchInfo"></span>
+    <div id="tableWrap" style="margin-top:12px;overflow-x:auto"></div>
+  </div>
+
+  <h2>4 · Fusion &amp; téléchargement</h2>
+  <div class="card">
+    <button id="btnMerge" disabled>Fusionner (1 PDF par chauffeur)</button>
+    <button id="btnZip" class="sec" disabled>Télécharger tout (ZIP)</button>
+    <span class="doux" id="mergeInfo"></span>
+  </div>
+
+  <h2>5 · Envoi</h2>
+  <div class="card">
+    <p class="hint">Une page web ne peut pas joindre un fichier et l'envoyer toute seule (sécurité du
+      navigateur). Pour chaque chauffeur : <b>téléchargez son PDF</b> (colonne « Fusion »), cliquez
+      <b>« Écrire l'email »</b> — votre messagerie s'ouvre avec le destinataire et le texte pré-remplis —
+      puis <b>joignez le PDF téléchargé</b> et envoyez.</p>
+    <label>Sujet de l'email</label>
+    <input type="text" id="sujet" style="width:100%;padding:6px" value="Vos documents de paie">
+    <label style="display:block;margin-top:10px">Message</label>
+    <textarea id="corps" style="width:100%;padding:6px;height:110px">Bonjour {prenom},
+
+Veuillez trouver ci-joint votre bulletin de paie ainsi que votre relevé.
+
+Bien cordialement,</textarea>
+    <p class="doux">Champs disponibles : <code>{prenom}</code> <code>{nom}</code></p>
+  </div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const $ = id => document.getElementById(id);
+let clients = [], bulletins = [], releves = [], merged = {};
+const texteCache = new Map();
+
+function normaliser(s){
+  return (s||"").normalize("NFKD").replace(/[̀-ͯ]/g,"")
+    .replace(/[^A-Za-z]+/g," ").toUpperCase().trim().replace(/\s+/g," ");
+}
+function nomFichier(s){
+  return (s||"").normalize("NFKD").replace(/[̀-ͯ]/g,"")
+    .replace(/[^A-Za-z0-9]+/g,"_").replace(/^_+|_+$/g,"") || "document";
+}
+function reperColonnes(entetes){
+  const n = entetes.map(e=>normaliser(e).toLowerCase());
+  const col = {};
+  n.forEach((e,i)=>{ if(e==="prenom")col.prenom=i; else if(e==="nom")col.nom=i;
+    else if(["email","e mail","mail","adresse mail","adresse email","courriel"].includes(e))col.email=i; });
+  n.forEach((e,i)=>{ if(Object.values(col).includes(i))return;
+    if(e.includes("prenom")&&col.prenom==null)col.prenom=i;
+    else if((e.includes("mail")||e.includes("courriel"))&&col.email==null)col.email=i;
+    else if(e.includes("nom")&&!e.includes("prenom")&&col.nom==null)col.nom=i; });
+  return col;
+}
+
+$("excel").addEventListener("change", async e=>{
+  const f = e.target.files[0]; if(!f) return;
+  const wb = XLSX.read(await f.arrayBuffer(), {type:"array"});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, blankrows:false});
+  let col=null, start=0;
+  for(let i=0;i<Math.min(10,rows.length);i++){
+    const c = reperColonnes(rows[i]||[]);
+    if(c.nom!=null&&c.prenom!=null&&c.email!=null){ col=c; start=i+1; break; }
+  }
+  if(!col){ $("excelInfo").innerHTML="<span class='etat-err'>Colonnes Nom, Prénom, Email introuvables.</span>"; return; }
+  const vus=new Set(); clients=[];
+  for(let i=start;i<rows.length;i++){
+    const r=rows[i]||[];
+    const nom=(r[col.nom]||"").toString().trim(),
+          prenom=(r[col.prenom]||"").toString().trim(),
+          email=(r[col.email]||"").toString().trim();
+    if(!nom||!prenom||!email) continue;
+    const cle=normaliser(nom+" "+prenom)+"|"+email.toLowerCase();
+    if(vus.has(cle)) continue; vus.add(cle);
+    clients.push({nom,prenom,email,cle:normaliser(nom+" "+prenom)});
+  }
+  $("excelInfo").innerHTML = `<span class="etat-ok">${clients.length} client(s) chargé(s).</span>`;
+  majBoutons();
+});
+
+function lireListe(input, cible){
+  input.addEventListener("change", e=>{
+    const arr = Array.from(e.target.files);
+    if(cible==="bulletins") bulletins=arr; else releves=arr;
+    $("pdfInfo").textContent = `${bulletins.length} bulletin(s), ${releves.length} relevé(s).`;
+    majBoutons();
+  });
+}
+lireListe($("bulletins"),"bulletins"); lireListe($("releves"),"releves");
+
+function majBoutons(){
+  $("btnMatch").disabled = !(clients.length && (bulletins.length||releves.length));
+}
+
+async function texteDe(file){
+  if(texteCache.has(file)) return texteCache.get(file);
+  let txt="";
+  try{
+    const pdf = await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+    for(let p=1;p<=Math.min(3,pdf.numPages);p++){
+      const c = await (await pdf.getPage(p)).getTextContent();
+      txt += " " + c.items.map(i=>i.str).join(" ");
+    }
+  }catch(e){ txt=""; }
+  const norm = " "+normaliser(txt || file.name)+" ";
+  texteCache.set(file, norm); return norm;
+}
+async function contientClient(file, client){
+  const t = await texteDe(file);
+  const nom=normaliser(client.nom), prenom=normaliser(client.prenom);
+  return t.includes(" "+nom+" "+prenom+" ") || t.includes(" "+prenom+" "+nom+" ");
+}
+async function autoChoix(client, fichiers){
+  for(const f of fichiers){ if(await contientClient(f,client)) return f.name; }
+  return "";
+}
+
+$("btnMatch").addEventListener("click", async ()=>{
+  $("btnMatch").disabled=true; $("matchInfo").textContent=" rapprochement en cours…";
+  let html = `<table><thead><tr><th>Client</th><th>Bulletin</th><th>Relevé</th><th>État</th><th>Fusion / Envoi</th></tr></thead><tbody>`;
+  for(let i=0;i<clients.length;i++){
+    const c=clients[i];
+    const ab=await autoChoix(c,bulletins), ar=await autoChoix(c,releves);
+    const optsB = ['<option value="">— aucun —</option>']
+      .concat(bulletins.map(f=>`<option ${f.name===ab?"selected":""}>${f.name}</option>`)).join("");
+    const optsR = ['<option value="">— aucun —</option>']
+      .concat(releves.map(f=>`<option ${f.name===ar?"selected":""}>${f.name}</option>`)).join("");
+    html += `<tr data-i="${i}">
+      <td>${c.nom.toUpperCase()} ${c.prenom}<br><span class="doux">${c.email}</span></td>
+      <td><select class="selB">${optsB}</select></td>
+      <td><select class="selR">${optsR}</select></td>
+      <td class="etat"></td>
+      <td class="row-actions fusion"></td></tr>`;
+  }
+  html+="</tbody></table>";
+  $("tableWrap").innerHTML=html;
+  $("tableWrap").querySelectorAll("tr[data-i]").forEach(majEtat);
+  $("tableWrap").querySelectorAll("select").forEach(s=>s.addEventListener("change",()=>majEtat(s.closest("tr"))));
+  $("matchInfo").textContent=""; $("btnMatch").disabled=false; $("btnMerge").disabled=false;
+});
+
+function majEtat(tr){
+  const b=tr.querySelector(".selB").value, r=tr.querySelector(".selR").value;
+  const cell=tr.querySelector(".etat");
+  if(b&&r){ cell.innerHTML='<span class="etat-ok">✅ complet</span>'; }
+  else if(b||r){ cell.innerHTML='<span class="etat-warn">⚠️ partiel</span>'; }
+  else { cell.innerHTML='<span class="etat-err">❌ aucun</span>'; }
+}
+
+function fichierParNom(nom){
+  return [...bulletins,...releves].find(f=>f.name===nom);
+}
+
+$("btnMerge").addEventListener("click", async ()=>{
+  $("btnMerge").disabled=true; merged={};
+  const rows=[...$("tableWrap").querySelectorAll("tr[data-i]")];
+  let n=0;
+  for(const tr of rows){
+    const i=+tr.dataset.i, c=clients[i];
+    const b=tr.querySelector(".selB").value, r=tr.querySelector(".selR").value;
+    const noms=[b,r].filter(Boolean); if(!noms.length){ tr.querySelector(".fusion").innerHTML=""; continue; }
+    const out=await PDFLib.PDFDocument.create();
+    for(const nm of noms){
+      const f=fichierParNom(nm); if(!f) continue;
+      const src=await PDFLib.PDFDocument.load(await f.arrayBuffer());
+      const pages=await out.copyPages(src, src.getPageIndices());
+      pages.forEach(p=>out.addPage(p));
+    }
+    const bytes=await out.save();
+    const blob=new Blob([bytes],{type:"application/pdf"});
+    const fname=`${nomFichier(c.nom+" "+c.prenom)}.pdf`;
+    merged[i]={client:c, blob, fname, url:URL.createObjectURL(blob)};
+    tr.querySelector(".fusion").innerHTML=
+      `<a download="${fname}" href="${merged[i].url}"><button class="sec">⬇︎ PDF</button></a>
+       <button class="mail" data-i="${i}">✉︎ Écrire l'email</button>`;
+    n++;
+  }
+  $("tableWrap").querySelectorAll("button.mail").forEach(btn=>btn.addEventListener("click",ecrireEmail));
+  $("mergeInfo").innerHTML=` <span class="etat-ok">${n} PDF prêt(s).</span>`;
+  $("btnMerge").disabled=false; $("btnZip").disabled = n===0;
+});
+
+function ecrireEmail(e){
+  const i=+e.target.dataset.i, m=merged[i]; if(!m) return;
+  const sujet=$("sujet").value.replace(/{prenom}/g,m.client.prenom).replace(/{nom}/g,m.client.nom);
+  const corps=$("corps").value.replace(/{prenom}/g,m.client.prenom).replace(/{nom}/g,m.client.nom);
+  window.location.href=`mailto:${encodeURIComponent(m.client.email)}`+
+    `?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(corps)}`;
+}
+
+$("btnZip").addEventListener("click", async ()=>{
+  const zip=new JSZip();
+  Object.values(merged).forEach(m=>zip.file(m.fname, m.blob));
+  const blob=await zip.generateAsync({type:"blob"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob); a.download="bulletins_fusionnes.zip"; a.click();
+});
+</script>
+</body>
+</html>
