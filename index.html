@@ -73,10 +73,6 @@
 
   <h2>5 · Envoi</h2>
   <div class="card">
-    <p class="hint">Une page web ne peut pas joindre un fichier et l'envoyer toute seule (sécurité du
-      navigateur). Pour chaque chauffeur : <b>téléchargez son PDF</b> (colonne « Fusion »), cliquez
-      <b>« Écrire l'email »</b> — votre messagerie s'ouvre avec le destinataire et le texte pré-remplis —
-      puis <b>joignez le PDF téléchargé</b> et envoyez.</p>
     <label>Sujet de l'email</label>
     <input type="text" id="sujet" style="width:100%;padding:6px" value="Vos documents de paie">
     <label style="display:block;margin-top:10px">Message</label>
@@ -86,6 +82,34 @@ Veuillez trouver ci-joint votre bulletin de paie ainsi que votre relevé.
 
 Bien cordialement,</textarea>
     <p class="doux">Champs disponibles : <code>{prenom}</code> <code>{nom}</code></p>
+
+    <h3 style="margin:1.2em 0 .3em">📤 Envoi groupé automatique (Brevo)</h3>
+    <p class="doux">Envoie chaque PDF à son chauffeur en un clic, via Brevo.
+      La clé reste <b>uniquement dans ce navigateur</b> (jamais partagée).</p>
+    <label>Clé API Brevo <span class="doux">(Brevo → SMTP &amp; API → « Clés API et MCP » → Générer)</span></label>
+    <input type="password" id="brevoKey" placeholder="xkeysib-…" style="width:100%;padding:6px">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+      <div style="flex:1;min-width:220px">
+        <label>Adresse d'expéditeur <span class="doux">(validée dans Brevo)</span></label>
+        <input type="text" id="sender" value="cooperativelmdcvtc@entrepreneur.fr" style="width:100%;padding:6px">
+      </div>
+      <div style="flex:1;min-width:180px">
+        <label>Campagne <span class="doux">(évite les doublons)</span></label>
+        <input type="text" id="campagne" placeholder="ex. Juin 2026" style="width:100%;padding:6px">
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <button id="btnSendAll" disabled>📤 Envoyer à tous</button>
+      <span class="doux" id="sendInfo"></span>
+    </div>
+    <div id="sendProgress" style="margin-top:10px;font-size:.88rem"></div>
+
+    <details style="margin-top:14px">
+      <summary class="doux" style="cursor:pointer">Ou : envoyer à la main, sans Brevo</summary>
+      <p class="hint" style="margin-top:8px">Pour chaque chauffeur : téléchargez son PDF (colonne
+        « Fusion »), cliquez « ✉︎ Écrire l'email » (votre messagerie s'ouvre pré-remplie), joignez
+        le PDF téléchargé et envoyez.</p>
+    </details>
   </div>
 </div>
 
@@ -242,7 +266,7 @@ $("btnMerge").addEventListener("click", async ()=>{
   }
   $("tableWrap").querySelectorAll("button.mail").forEach(btn=>btn.addEventListener("click",ecrireEmail));
   $("mergeInfo").innerHTML=` <span class="etat-ok">${n} PDF prêt(s).</span>`;
-  $("btnMerge").disabled=false; $("btnZip").disabled = n===0;
+  $("btnMerge").disabled=false; $("btnZip").disabled = n===0; majEnvoi();
 });
 
 function ecrireEmail(e){
@@ -260,6 +284,64 @@ $("btnZip").addEventListener("click", async ()=>{
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob); a.download="bulletins_fusionnes.zip"; a.click();
 });
+
+// ---- Envoi groupé automatique via Brevo ----
+try{ const k=localStorage.getItem("paieweb_brevokey"); if(k)$("brevoKey").value=k; }catch(e){}
+try{ const s=localStorage.getItem("paieweb_sender"); if(s)$("sender").value=s; }catch(e){}
+$("brevoKey").addEventListener("input", ()=>{ try{localStorage.setItem("paieweb_brevokey",$("brevoKey").value.trim());}catch(e){} majEnvoi(); });
+$("sender").addEventListener("input", ()=>{ try{localStorage.setItem("paieweb_sender",$("sender").value.trim());}catch(e){} });
+
+function majEnvoi(){
+  const n=Object.keys(merged).length, key=$("brevoKey").value.trim();
+  $("btnSendAll").disabled = !(n>0 && key);
+  $("btnSendAll").textContent = `📤 Envoyer à tous${n?` (${n})`:""}`;
+}
+function journalLu(){ try{return JSON.parse(localStorage.getItem("paieweb_journal")||"{}");}catch(e){return {};} }
+function journalEcris(j){ try{localStorage.setItem("paieweb_journal",JSON.stringify(j));}catch(e){} }
+function blobBase64(blob){
+  return new Promise(res=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result.split(",")[1]); fr.readAsDataURL(blob); });
+}
+async function envoyerUn(key, sender, m, sujet, corps){
+  const b64 = await blobBase64(m.blob);
+  const r = await fetch("https://api.brevo.com/v3/smtp/email",{
+    method:"POST",
+    headers:{"api-key":key,"content-type":"application/json","accept":"application/json"},
+    body: JSON.stringify({
+      sender:{email:sender},
+      to:[{email:m.client.email}],
+      subject: sujet.replace(/{prenom}/g,m.client.prenom).replace(/{nom}/g,m.client.nom),
+      textContent: corps.replace(/{prenom}/g,m.client.prenom).replace(/{nom}/g,m.client.nom),
+      attachment:[{content:b64, name:m.fname}]
+    })
+  });
+  if(!r.ok) throw new Error("HTTP "+r.status+" — "+(await r.text()).slice(0,180));
+}
+$("btnSendAll").addEventListener("click", async ()=>{
+  const key=$("brevoKey").value.trim(), sender=$("sender").value.trim();
+  const campagne=$("campagne").value.trim(), sujet=$("sujet").value, corps=$("corps").value;
+  if(!key||!sender) return;
+  const items=Object.values(merged), journal=journalLu();
+  const aEnvoyer=items.filter(m=>!(campagne && journal[campagne+"|"+m.client.email.toLowerCase()]));
+  const deja=items.length-aEnvoyer.length;
+  if(!confirm(`Envoyer ${aEnvoyer.length} email(s)`+(deja?` (${deja} déjà envoyé(s) pour « ${campagne} », ignorés)`:"")+" ?")) return;
+  $("btnSendAll").disabled=true;
+  const prog=$("sendProgress"); prog.innerHTML=""; let ok=0, ko=0;
+  for(const m of aEnvoyer){
+    const line=document.createElement("div"); prog.appendChild(line);
+    try{
+      await envoyerUn(key, sender, m, sujet, corps);
+      ok++; line.innerHTML=`<span class="etat-ok">✅ ${m.client.nom.toUpperCase()} ${m.client.prenom} → ${m.client.email}</span>`;
+      if(campagne){ journal[campagne+"|"+m.client.email.toLowerCase()]=Date.now(); journalEcris(journal); }
+    }catch(e){
+      ko++; line.innerHTML=`<span class="etat-err">❌ ${m.client.nom.toUpperCase()} ${m.client.prenom} : ${e.message}</span>`;
+    }
+    await new Promise(r=>setTimeout(r,500));
+  }
+  $("sendInfo").innerHTML = ko ? `<span class="etat-warn"> ${ok} envoyé(s), ${ko} échec(s)</span>`
+                               : `<span class="etat-ok"> ${ok} email(s) envoyé(s) ✔</span>`;
+  $("btnSendAll").disabled=false;
+});
+majEnvoi();
 </script>
 </body>
 </html>
