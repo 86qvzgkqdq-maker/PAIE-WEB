@@ -91,7 +91,7 @@ Bien cordialement,</textarea>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
       <div style="flex:1;min-width:220px">
         <label>Adresse d'expéditeur <span class="doux">(validée dans Brevo)</span></label>
-        <input type="text" id="sender" value="cooperativelmdcvtc@entrepreneur.fr" style="width:100%;padding:6px">
+        <input type="text" id="sender" value="fakreddine@moov-in-cab.fr" style="width:100%;padding:6px">
       </div>
       <div style="flex:1;min-width:180px">
         <label>Campagne <span class="doux">(évite les doublons)</span></label>
@@ -316,15 +316,25 @@ async function envoyerUn(key, sender, m, sujet, corps){
   });
   if(!r.ok) throw new Error("HTTP "+r.status+" — "+(await r.text()).slice(0,180));
 }
+let armeEnvoi=false, armeTimer=null;
 $("btnSendAll").addEventListener("click", async ()=>{
   const key=$("brevoKey").value.trim(), sender=$("sender").value.trim();
   const campagne=$("campagne").value.trim(), sujet=$("sujet").value, corps=$("corps").value;
-  if(!key||!sender) return;
+  if(!key||!sender){ $("sendInfo").innerHTML='<span class="etat-err"> Renseignez la clé API et l\'adresse d\'expéditeur.</span>'; return; }
   const items=Object.values(merged), journal=journalLu();
   const aEnvoyer=items.filter(m=>!(campagne && journal[campagne+"|"+m.client.email.toLowerCase()]));
   const deja=items.length-aEnvoyer.length;
-  if(!confirm(`Envoyer ${aEnvoyer.length} email(s)`+(deja?` (${deja} déjà envoyé(s) pour « ${campagne} », ignorés)`:"")+" ?")) return;
-  $("btnSendAll").disabled=true;
+  if(!aEnvoyer.length){ $("sendInfo").innerHTML=`<span class="etat-warn"> Rien à envoyer${deja?` (déjà tous envoyés pour « ${campagne} »)`:""}.</span>`; return; }
+  // Confirmation en 2 clics (les pop-ups système sont bloqués dans cette page).
+  if(!armeEnvoi){
+    armeEnvoi=true;
+    $("btnSendAll").textContent=`⚠️ Confirmer : envoyer ${aEnvoyer.length} email(s)`;
+    $("sendInfo").innerHTML=`<span class="etat-warn"> ${deja?deja+" déjà envoyé(s) ignoré(s). ":""}Cliquez une 2ᵉ fois pour lancer l'envoi.</span>`;
+    clearTimeout(armeTimer); armeTimer=setTimeout(()=>{ armeEnvoi=false; $("sendInfo").textContent=""; majEnvoi(); }, 12000);
+    return;
+  }
+  armeEnvoi=false; clearTimeout(armeTimer);
+  $("btnSendAll").disabled=true; $("btnSendAll").textContent="Envoi en cours…";
   const prog=$("sendProgress"); prog.innerHTML=""; let ok=0, ko=0;
   for(const m of aEnvoyer){
     const line=document.createElement("div"); prog.appendChild(line);
@@ -339,7 +349,7 @@ $("btnSendAll").addEventListener("click", async ()=>{
   }
   $("sendInfo").innerHTML = ko ? `<span class="etat-warn"> ${ok} envoyé(s), ${ko} échec(s)</span>`
                                : `<span class="etat-ok"> ${ok} email(s) envoyé(s) ✔</span>`;
-  $("btnSendAll").disabled=false;
+  $("btnSendAll").disabled=false; majEnvoi();
 });
 majEnvoi();
 </script>
